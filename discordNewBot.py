@@ -82,7 +82,7 @@ def generate_mistral_response(user_input, history):
         stop=["<|im_end|>", "Lui:", "Toi:", "user", "assistant", "<|im_start|>"]
     )
 # --- ICI ON REMPLACE "nomDuBot" par le nom que vous lui avez donner sur le developper portal de discord" ---
-    return output['choices'][0]['text'].strip().replace("Wazai:", "").replace("Toi:", "").strip()
+    return output['choices'][0]['text'].strip().replace("nomDuBot:", "").replace("Toi:", "").strip()
 
 @client.event
 async def on_ready():
