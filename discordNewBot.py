@@ -1,9 +1,12 @@
+import asyncio
 import discord
 import requests
 import base64
 import os
 from llama_cpp import Llama
 import relance
+import emotion
+from llama_cpp.llama_chat_format import NanoLlavaChatHandler
 
 # --- CONFIGURATION METTEZ VOTRE TOKEN ENTRE LES GUILLEMETS---
 DISCORD_TOKEN = ""
@@ -18,10 +21,10 @@ MMPROJ_PATH = ""
 
 # --- INITIALISATION DES MODÈLES CHANGEZ LES PARAMETRES EN FONCTION DE VOTRE CONFIG---
 print("1/2 - Chargement des yeux (Llama Vision)...")
-
+chat_handler = NanoLlavaChatHandler(clip_model_path=MMPROJ_PATH)
 llm_vision = Llama(
     model_path=LLAMA_VISION_MODEL,
-    clip_model_path=MMPROJ_PATH,
+    chat_handler=chat_handler,
     n_ctx=2048,
     n_threads=8,
     n_gpu_layers=15
@@ -32,7 +35,7 @@ llm_text = Llama(
     model_path=MISTRAL_TEXT_MODEL,
     n_ctx=2048,
     n_threads=8,
-    n_gpu_layers=15
+    n_gpu_layers=15 
 )
 print("Tous les modèles sont prêts !")
 
@@ -58,19 +61,31 @@ def image_to_base64(url):
     return None
 
 def analyze_image_with_llama(base64_image):
-    """Demande à Llava de décrire l'image objectivement"""
-    prompt = f"<|im_start|>user\n[img-0]\nDescribe this image in detail but objectively. What objects, text, colors, or memes are present? Be direct.<|im_end|>\n<|im_start|>assistant\n"
+    """Analyse l'image de manière fluide grâce au Chat Handler officiel"""
     
-    output = llm_vision(
-        prompt=prompt,
-        image_hdrs=[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}],
-        max_tokens=150
+    output = llm_vision.create_chat_completion(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image in detail but objectively. What objects, text, colors, or memes are present? Be direct."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                    }
+                ]
+            }
+        ],
+        max_tokens=150,
+        temperature=0.2
     )
-    return output['choices'][0]['text'].strip()
+    
+    return output['choices'][0]['message']['content'].strip()
 
 def generate_mistral_response(user_input, history):
-    """Mistral génère la réponse finale"""
-    full_prompt = f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+    """Mistral génère la réponse finale sous les traits de Wazai"""
+    prompt_emotionnel, temp_emotionnelle = emotion.obtenir_prompt_et_temp(SYSTEM_PROMPT)
+    full_prompt = f"<|im_start|>system\n{prompt_emotionnel}<|im_end|>\n"
     if history:
         full_prompt += f"{history}\n"
     full_prompt += f"<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n"
@@ -78,15 +93,16 @@ def generate_mistral_response(user_input, history):
     output = llm_text(
         full_prompt,
         max_tokens=1000,
-        temperature=0.85,
+        temperature=temp_emotionnelle,
         stop=["<|im_end|>", "Lui:", "Toi:", "user", "assistant", "<|im_start|>"]
     )
-# --- ICI ON REMPLACE "nomDuBot" par le nom que vous lui avez donner sur le developper portal de discord" ---
-    return output['choices'][0]['text'].strip().replace("nomDuBot:", "").replace("Toi:", "").strip()
+    return output['choices'][0]['text'].strip().replace("Wazai:", "").replace("Toi:", "").strip()
 
 @client.event
 async def on_ready():
     print(f'Bot connecté sur : {client.user}')
+    if not emotion.boucle_changement_emotion.is_running():
+        emotion.boucle_changement_emotion.start()
     await relance.verifier_messages_manques(client, llm_text, SYSTEM_PROMPT, message_history)
     relance.boucle_relance_automatique.start(client, llm_text, SYSTEM_PROMPT, message_history)
 
@@ -108,6 +124,7 @@ async def on_message(message):
         async with message.channel.typing():
             image_description = ""
             
+            # 1. Gestion de l'image (si présente)
             if message.attachments:
                 for attachment in message.attachments:
                     if attachment.content_type and attachment.content_type.startswith('image/'):
@@ -115,14 +132,17 @@ async def on_message(message):
                         b64_img = image_to_base64(attachment.url)
                         if b64_img:
                             try:
-                                image_description = analyze_image_with_llama(b64_img)
+                                loop = asyncio.get_running_loop()
+                                image_description = await loop.run_in_executor(None, analyze_image_with_llama, b64_img)
                                 print(f"[IMAGE DESC] Le modèle a vu : {image_description}")
                             except Exception as e:
                                 print(f"[ERREUR VISION] : {e}")
                                 image_description = "impossible de lire l'image suite à une erreur technique"
                         break
 
+            # 2. Construction de ce qu'on injecte à Mistral
             if image_description:
+                # On explique le contexte à Mistral dans le prompt utilisateur
                 text_content = f"[L'utilisateur t'envoie une image. Voici la description visuelle de ce qu'il y a sur l'image : {image_description}]."
                 if user_input:
                     text_content += f" En plus de l'image, il te dit : \"{user_input}\""
@@ -131,14 +151,18 @@ async def on_message(message):
             else:
                 text_content = user_input if user_input else "wesh"
 
+            # 3. Génération finale par Mistral
             hist = message_history.get(user_id, "")
-            reply = generate_mistral_response(text_content, hist)
-
+            loop = asyncio.get_running_loop()
+            reply = await loop.run_in_executor(None, generate_mistral_response, text_content, hist)
+            
             if not reply:
                 reply = "jsp quoi dire mdr"
 
-            print(f"[Ai]: {reply}")
+            print(f"[Wazai]: {reply}")
 
+            # Sauvegarde de l'historique de discussion
+            # Note : On enregistre une version simplifiée dans l'historique pour ne pas saturer le contexte avec la description d'image brute
             hist_input = user_input if user_input else "[Envoie une image]"
             new_entry = f"<|im_start|>user\n{hist_input}<|im_end|>\n<|im_start|>assistant\n{reply}<|im_end|>"
             if user_id not in message_history:
